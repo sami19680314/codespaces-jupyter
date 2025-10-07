@@ -1,0 +1,141 @@
+import arcpy
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.linear_model import LinearRegression
+from sklearn.model_selection import train_test_split
+
+#  הגדרות נתיבים
+
+path_to_csv = r"C:\Users\Sami\Desktop\python-2\final_prj\Final_PythonGIS\housing.csv"
+gdb_path = r"C:\Users\Sami\Desktop\python-2\final_prj\Final_PythonGIS\FinalProj.gdb"
+
+arcpy.env.workspace = gdb_path
+arcpy.env.overwriteOutput = True
+
+print(" סביבת העבודה הוגדרה:", gdb_path)
+
+#  קריאה וניתוח נתונים
+
+housing = pd.read_csv(path_to_csv)
+
+# המרה למספרים וניקוי בסיסי
+cols = ['price', 'area', 'bedrooms']
+for c in cols:
+    housing[c] = pd.to_numeric(housing[c], errors='coerce')
+housing.fillna(housing.mean(numeric_only=True), inplace=True)
+
+print("טעינת הנתונים הצליחה:")
+print(housing.head(3), "\n")
+
+# סטטיסטיקות
+for col in ['price', 'area']:
+    print(f"{col}: mean={housing[col].mean():.2f}, median={housing[col].median():.2f}, std={housing[col].std():.2f}")
+print("\nמתאם price-area:", housing['price'].corr(housing['area']), "\n")
+
+# גרפים בסיסיים
+housing[['price', 'area']].hist(bins=25, figsize=(10,4))
+plt.tight_layout()
+plt.show()
+
+plt.scatter(housing['area'], housing['price'], color='blue')
+plt.xlabel('Area')
+plt.ylabel('Price')
+plt.title('Price vs Area')
+plt.show()
+
+#  Spatial tasks – ArcPy
+
+# יצירת Feature Class של בתי מגורים מ-CSV
+house_fc = "House_Prices"
+if arcpy.Exists(house_fc):
+    arcpy.management.Delete(house_fc)
+
+spatial_ref = arcpy.SpatialReference(2039)  # Israel TM Grid
+arcpy.management.XYTableToPoint(
+    path_to_csv,
+    house_fc,
+    x_field="longitude",
+    y_field="latitude",
+    coordinate_system=spatial_ref
+)
+print(" Feature Class 'House_Prices' נוצר בהצלחה!")
+
+# Buffer למרכז העיר (City_Center)
+city_center = "City_Center"
+zonal_center = "Zonal_Center"
+if arcpy.Exists(zonal_center):
+    arcpy.management.Delete(zonal_center)
+
+arcpy.analysis.Buffer(city_center, zonal_center, "750 Meters")
+print(" Buffer 'Zonal_Center' נוצר בהצלחה!")
+
+# חישוב מרחק של כל בית מהמרכז
+arcpy.analysis.Near(house_fc, zonal_center)
+print(" מרחקים חושבו (שדה NEAR_DIST נוסף ל-House_Prices)")
+
+#  עדכון טבלת CSV מתוך המרחקים בתוך ARCGIS
+
+
+# קריאה חזרה של טבלת התוצאות
+near_table = [row for row in arcpy.da.SearchCursor(house_fc, ['price', 'area', 'bedrooms', 'NEAR_DIST'])]
+near_df = pd.DataFrame(near_table, columns=['price', 'area', 'bedrooms', 'distance'])
+
+# ניקוי
+for c in ['price', 'area', 'bedrooms', 'distance']:
+    near_df[c] = pd.to_numeric(near_df[c], errors='coerce')
+near_df.fillna(near_df.mean(numeric_only=True), inplace=True)
+
+#  יצירת אינדקס ומודל רגרסיה
+
+near_df['index'] = (near_df['bedrooms'] * near_df['area']) / near_df['distance']
+near_df.replace([np.inf, -np.inf], np.nan, inplace=True)
+near_df['index'].fillna(near_df['index'].median(), inplace=True)
+near_df.dropna(subset=['index', 'price'], inplace=True)
+
+# פיצול נתונים
+X = near_df[['index']].values
+y = near_df['price'].values
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+# אימון מודל
+model = LinearRegression()
+model.fit(X_train, y_train)
+y_pred = model.predict(X_test)
+
+print("\n רגרסיה הושלמה בהצלחה!")
+print(f"Intercept (b): {model.intercept_:.2f}")
+print(f"Coefficient (w): {model.coef_[0]:.4f}")
+print(f"R² score: {model.score(X_test, y_test):.4f}\n")
+
+#  גרפים לרגרסיה
+
+plt.scatter(X_test, y_test, color='blue', label='Actual')
+plt.plot(X_test, y_pred, color='red', label='Predicted line')
+plt.xlabel('Index')
+plt.ylabel('Price')
+plt.title('Linear Regression: Price vs Index')
+plt.legend()
+plt.show()
+
+plt.scatter(y_test, y_pred, color='orange')
+plt.xlabel('Actual Price')
+plt.ylabel('Predicted Price')
+plt.title('Actual vs Predicted')
+plt.show()
+
+errors = y_test - y_pred
+plt.scatter(y_test, errors, color='purple')
+plt.axhline(0, color='red', linestyle='--')
+plt.xlabel('Actual Price')
+plt.ylabel('Error')
+plt.title('Errors Scatter')
+plt.show()
+
+plt.hist(errors, bins=30, color='gray')
+plt.title('Error Distribution')
+plt.xlabel('Error Value')
+plt.ylabel('Count')
+plt.show()
+
+print(" כל השלבים הושלמו בהצלחה – כולל GIS, סטטיסטיקה ורגרסיה!")
